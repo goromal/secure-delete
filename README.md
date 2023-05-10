@@ -1,5 +1,7 @@
 # secure-delete
 
+![example workflow](https://github.com/goromal/secure-delete/actions/workflows/test.yml/badge.svg)
+
 Condensed version of the secure remove utility (https://github.com/cryptisk-grs/thc-secure-delete).
 
 ## Building
