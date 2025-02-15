@@ -9,6 +9,9 @@ use std::ffi::CString;
 use rand::Rng;
 use rand::thread_rng;
 use libc;
+use std::io::{stdout, stderr};
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::fd::{BorrowedFd, AsRawFd};
 
 const BLOCKSIZE: usize = 32769; // must be mod 3 = 0, should be >= 16k
 const RANDOM_DEVICE: &str = "/dev/urandom"; // must not exist
@@ -45,7 +48,7 @@ static mut SLOW: bool = false;
 static mut RECURSIVE: bool = false;
 static mut ZERO: bool = false;
 static mut BUFSIZE: usize = BLOCKSIZE;
-static mut FD: i32 = 0;
+static mut FD: i32 = -1;
 
 fn sdel_fill_buf(pattern: &[u8; 3], bufsize: usize, buf: &mut [u8]) {
     for loop_ in 0..(bufsize / 3) {
@@ -74,13 +77,13 @@ fn sdel_random_filename(filename: &mut String) {
     if let Some(index) = filename.rfind(DIR_SEPARATOR) {
         for i in (index + 1..filename.len()).rev() {
             if filename.as_bytes()[i] != b'.' {
-                filename.replace_range(i..i + 1, &((rng.gen::<u8>() % 26) + 97) as &u8 as &str);
+                filename.replace_range(i..i + 1, &char::from_u32(((rng.gen::<u8>() % 26) + 97) as u32).unwrap().to_string());
             }
         }
     } else {
         for i in (0..filename.len()).rev() {
             if filename.as_bytes()[i] != b'.' {
-                filename.replace_range(i..i + 1, &((rng.gen::<u8>() % 26) + 97) as &u8 as &str);
+                filename.replace_range(i..i + 1, &char::from_u32(((rng.gen::<u8>() % 26) + 97) as u32).unwrap().to_string());
             }
         }
     }
@@ -89,8 +92,8 @@ fn sdel_random_filename(filename: &mut String) {
 fn sdel_init(secure_random: bool) {
     unsafe {
         // Disable buffering for stdout and stderr (equivalent to setvbuf)
-        libc::setbuf(libc::stdout, std::ptr::null_mut());
-        libc::setbuf(libc::stderr, std::ptr::null_mut());
+        libc::setbuf(stdout().as_raw_fd() as *mut libc::FILE, std::ptr::null_mut());
+        libc::setbuf(stderr().as_raw_fd() as *mut libc::FILE, std::ptr::null_mut());
 
         if BLOCKSIZE < 16384 {
             eprintln!("Programming Warning: in-compiled blocksize is <16k !");
@@ -99,7 +102,7 @@ fn sdel_init(secure_random: bool) {
             eprintln!("Programming Error: in-compiled blocksize is not a multiple of 3!");
         }
 
-        libc::srand((libc::getpid() + libc::getuid() as i32 + libc::getgid() as i32) ^ libc::time(std::ptr::null_mut()) as u32);
+        libc::srand(((libc::getpid() + libc::getuid() as i32 + libc::getgid() as i32) ^ libc::time(std::ptr::null_mut()) as i32) as u32);
         DEV_RANDOM = None;
 
         if secure_random {
@@ -146,7 +149,10 @@ fn sdel_overwrite(mode: i32, fd: i32, start: i64, bufsize: usize, length: u64, z
             eprintln!("Programming Error: sdel-lib was not initialized before sdel_overwrite().");
         }
 
-        let file = File::open(format!("/proc/self/fd/{}", fd))?;
+        use std::os::unix::io::FromRawFd;
+
+        // Create a File from the file descriptor
+        let file = unsafe { File::from_raw_fd(fd) };
         let mut f = std::io::BufWriter::new(file);
 
         // calculate the number of writes
@@ -188,6 +194,7 @@ fn sdel_overwrite(mode: i32, fd: i32, start: i64, bufsize: usize, length: u64, z
                 print!("*");
             }
             f.flush()?;
+            #[cfg(target_os = "linux")]
             sync();
 
             if mode == 0 {
@@ -535,16 +542,6 @@ fn smash_it(filename: &str, mode: i32) -> Result<(), String> {
     }
 }
 
-fn cleanup(signo: i32) {
-    eprintln!("Terminated by signal. Clean exit.");
-    unsafe {
-        if FD >= 0 {
-            let _ = libc::close(FD);
-        }
-    }
-    sync();
-    std::process::exit(1);
-}
 
 fn main() -> Result<(), String> {
     let mut errors = 0;
@@ -581,9 +578,19 @@ fn main() -> Result<(), String> {
     }
 
     unsafe {
-        libc::signal(libc::SIGINT, cleanup as usize);
-        libc::signal(libc::SIGTERM, cleanup as usize);
-        libc::signal(libc::SIGHUP, cleanup as usize);
+            extern "C" fn cleanup(signo: i32) {
+                eprintln!("Terminated by signal. Clean exit.");
+                unsafe {
+                    if FD >= 0 {
+                        let _ = libc::close(FD);
+                    }
+                }
+                unsafe { sync(); }
+                std::process::exit(1);
+            }
+            libc::signal(libc::SIGINT, unsafe { std::mem::transmute(cleanup as unsafe extern "C" fn(libc::c_int) -> ()) });
+            libc::signal(libc::SIGTERM, unsafe { std::mem::transmute(cleanup as unsafe extern "C" fn(libc::c_int) -> ()) });
+            libc::signal(libc::SIGHUP, unsafe { std::mem::transmute(cleanup as unsafe extern "C" fn(libc::c_int) -> ()) });
     }
 
     sdel_init(unsafe { SLOW });
