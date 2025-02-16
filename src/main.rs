@@ -44,7 +44,8 @@ static mut DEV_RANDOM: Option<File> = None;
 static mut VERBOSE: i32 = 0;
 static mut INTERNAL_SDEL_INIT: i32 = 0;
 
-static mut SLOW: bool = false;
+static mut SLOW: bool = true;
+static mut USE_O_SYNC: bool = true;
 static mut RECURSIVE: bool = false;
 static mut ZERO: bool = false;
 static mut BUFSIZE: usize = BLOCKSIZE;
@@ -90,16 +91,17 @@ fn sdel_random_filename(filename: &mut String) {
 }
 
 fn sdel_init(secure_random: bool) {
+    println!("sdel_init called with secure_random = {}", secure_random);
     unsafe {
         // Disable buffering for stdout and stderr (equivalent to setvbuf)
-        libc::setbuf(stdout().as_raw_fd() as *mut libc::FILE, std::ptr::null_mut());
-        libc::setbuf(stderr().as_raw_fd() as *mut libc::FILE, std::ptr::null_mut());
+        //libc::setbuf(stdout().as_raw_fd() as *mut libc::FILE, std::ptr::null_mut());
+        //libc::setbuf(stderr().as_raw_fd() as *mut libc::FILE, std::ptr::null_mut());
 
         if BLOCKSIZE < 16384 {
             eprintln!("Programming Warning: in-compiled blocksize is <16k !");
         }
         if BLOCKSIZE % 3 > 0 {
-            eprintln!("Programming Error: in-compiled blocksize is not a multiple of 3!");
+            eprintln!("Programming Error: in-compiled blocksize is not a multiple of 3!\n");
         }
 
         libc::srand(((libc::getpid() + libc::getuid() as i32 + libc::getgid() as i32) ^ libc::time(std::ptr::null_mut()) as i32) as u32);
@@ -111,7 +113,11 @@ fn sdel_init(secure_random: bool) {
                 if VERBOSE > 0 {
                     println!("Using {} for random input.", RANDOM_DEVICE);
                 }
+            } else {
+                eprintln!("Error opening {}: {:?}", RANDOM_DEVICE, File::open(RANDOM_DEVICE).err());
             }
+        } else {
+            DEV_RANDOM = None;
         }
 
         INTERNAL_SDEL_INIT = 1;
@@ -149,10 +155,10 @@ fn sdel_overwrite(mode: i32, fd: i32, start: i64, bufsize: usize, length: u64, z
             eprintln!("Programming Error: sdel-lib was not initialized before sdel_overwrite().");
         }
 
-        use std::os::unix::io::FromRawFd;
+        use std::os::unix::io::{IntoRawFd, FromRawFd, AsRawFd};
 
         // Create a File from the file descriptor
-        let file = unsafe { File::from_raw_fd(fd) };
+        let file = unsafe { File::from_raw_fd(fd.as_raw_fd()) };
         let mut f = std::io::BufWriter::new(file);
 
         // calculate the number of writes
@@ -192,6 +198,7 @@ fn sdel_overwrite(mode: i32, fd: i32, start: i64, bufsize: usize, length: u64, z
 
             if VERBOSE > 0 {
                 print!("*");
+                stdout().flush()?;
             }
             f.flush()?;
             #[cfg(target_os = "linux")]
@@ -544,6 +551,7 @@ fn smash_it(filename: &str, mode: i32) -> Result<(), String> {
 
 
 fn main() -> Result<(), String> {
+    println!("main called");
     let mut errors = 0;
     let mut dot = false;
     let mut secure = 2; // Standard is now SECURE mode (38 overwrites) [since v2.0]
@@ -558,7 +566,10 @@ fn main() -> Result<(), String> {
     while i < args.len() {
         match args[i].as_str() {
             "-d" | "-D" => dot = true,
-            "-f" | "-F" => unsafe { SLOW = false; },
+            "-f" | "-F" => {
+                unsafe { SLOW = false; }
+                println!("-f flag set, SLOW = {}", unsafe { SLOW });
+            }
             "-l" | "-L" => {
                 if secure > 0 {
                     secure -= 1;
@@ -593,18 +604,19 @@ fn main() -> Result<(), String> {
             libc::signal(libc::SIGHUP, unsafe { std::mem::transmute(cleanup as unsafe extern "C" fn(libc::c_int) -> ()) });
     }
 
-    sdel_init(unsafe { SLOW });
-
     unsafe {
         if VERBOSE > 0 {
             let type_ = if ZERO { "zero" } else { "random" };
             match secure {
-                0 => println!("Wipe mode is insecure (one pass [{}])", type_),
-                1 => println!("Wipe mode is insecure (two passes [0xff/{}])", type_),
-                _ => println!("Wipe mode is secure (38 special passes)"),
+                0 => { println!("Wipe mode is insecure (one pass [{}])", type_); }
+                1 => { println!("Wipe mode is insecure (two passes [0xff/{}])", type_); }
+                _ => { println!("Wipe mode is secure (38 special passes)"); }
             }
         }
     }
+
+    println!("SLOW = {}", unsafe { SLOW });
+    sdel_init(unsafe { SLOW });
 
     // Removed RLIMIT_INFINITY and RLIMIT_FSIZE related code
 
