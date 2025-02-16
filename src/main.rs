@@ -533,7 +533,7 @@ fn smash_it(filename: &str, mode: i32) -> Result<(), String> {
             }
 
             let file_size = filestat.len();
-            sdel_overwrite(mode, FD, 0, BUFSIZE, file_size, ZERO).map_err(|e| e.to_string())?;
+            sdel_overwrite(mode, fd.as_raw_fd(), 0, BUFSIZE, file_size, ZERO).map_err(|e| e.to_string())?;
             return sdel_unlink(filename, false, true, SLOW).map_err(|e| e.to_string());
         } else {
             if filestat.is_dir() {
